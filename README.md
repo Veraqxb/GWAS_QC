@@ -4,8 +4,6 @@ This repository provides a server-ready workflow for batch quality control of GC
 
 It is designed for use cases like:
 
-- 3 populations: 200, 500, and 540 samples
-- ~1500 traits per population
 - thousands of `.mlma` result files
 - automated Manhattan plot, QQ plot, lambda GC, P-value sanity checks, and QC flagging
 
@@ -30,9 +28,9 @@ For the whole batch, it writes:
 ```text
 project/
   gwas-results/
-    pop200/
-    pop500/
-    pop540/
+    pop1/
+    pop2/
+    pop3/
   manifest.tsv
   gwas-mlma-batch-qc/
 ```
@@ -45,9 +43,9 @@ Create a tab-separated `manifest.tsv` with these columns:
 
 ```text
 population	trait	file
-pop200	height	/path/to/gwas-results/pop200/height.mlma
-pop500	height	/path/to/gwas-results/pop500/height.mlma
-pop540	height	/path/to/gwas-results/pop540/height.mlma
+pop1	height	/path/to/gwas-results/pop1/height.mlma
+pop2	height	/path/to/gwas-results/pop2/height.mlma
+pop3	height	/path/to/gwas-results/pop3/height.mlma
 ```
 
 Optional columns are allowed and preserved in the output, for example `sample_size`, `batch`, or `note`.

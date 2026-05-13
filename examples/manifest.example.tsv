@@ -1,4 +1,4 @@
 population	trait	file	sample_size
-pop200	example_trait_1	/path/to/pop200/example_trait_1.mlma	200
-pop500	example_trait_1	/path/to/pop500/example_trait_1.mlma	500
-pop540	example_trait_1	/path/to/pop540/example_trait_1.mlma	540
+pop1	example_trait_1	/path/to/pop200/example_trait_1.mlma	200
+pop2	example_trait_1	/path/to/pop500/example_trait_1.mlma	300
+pop3	example_trait_1	/path/to/pop540/example_trait_1.mlma	400
