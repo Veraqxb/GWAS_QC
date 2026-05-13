@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-Rscript examples/create_smoke_data.R smoke_data
+PYTHON_BIN=${PYTHON:-python}
 
-Rscript scripts/gwas_mlma_qc.R \
+"$PYTHON_BIN" examples/create_smoke_data.py smoke_data
+
+"$PYTHON_BIN" scripts/gwas_mlma_qc_fast.py \
   --manifest smoke_data/manifest.tsv \
   --outdir qc_example \
-  --threads 2
+  --threads 2 \
+  --mode metrics

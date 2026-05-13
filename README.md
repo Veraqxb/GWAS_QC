@@ -52,6 +52,18 @@ Optional columns are allowed and preserved in the output, for example `sample_si
 
 An example file is provided at `examples/manifest.example.tsv`.
 
+## Install Fast Python Dependencies
+
+The recommended server workflow uses the Python fast script.
+
+```bash
+conda install -c conda-forge numpy scipy matplotlib polars
+```
+
+If `polars` is unavailable, the script can still run with a slower Python `csv` fallback, but installing Polars is strongly recommended.
+For whitespace-delimited GCTA `.mlma` files, the fast script uses `numpy.loadtxt(usecols=...)` to read only the required columns.
+Use Python 3.8 or newer.
+
 ## Install R Dependencies
 
 On most Linux servers:
@@ -62,16 +74,18 @@ Rscript -e 'install.packages(c("data.table", "ggplot2"), repos="https://cloud.r-
 
 No other R packages are required.
 
+The R script is kept as a stable fallback. For large batches, prefer `scripts/gwas_mlma_qc_fast.py`.
+
 ## Three-Step QC Workflow
 
 For large batches, use the three-step workflow below. It is much faster than drawing Manhattan plots for every `.mlma` file.
 
-### Step 1: Numeric QC Only
+### Step 1: Numeric QC Only, Fast Python
 
 This reads each `.mlma` file, calculates QC metrics, and does not draw plots.
 
 ```bash
-Rscript scripts/gwas_mlma_qc.R \
+python scripts/gwas_mlma_qc_fast.py \
   --manifest manifest.tsv \
   --outdir qc_step1_metrics \
   --threads 8 \
@@ -86,12 +100,12 @@ Main outputs:
 - `qc_fail.tsv`
 - `qc_quality_solutions.tsv`
 
-### Step 2: QQ Plots For All Results
+### Step 2: QQ Plots For All Results, Fast Python
 
 This draws QQ plots for all manifest rows and classifies the QQ shape.
 
 ```bash
-Rscript scripts/gwas_mlma_qc.R \
+python scripts/gwas_mlma_qc_fast.py \
   --manifest manifest.tsv \
   --outdir qc_step2_qq \
   --threads 4 \
@@ -119,7 +133,7 @@ QQ shape classes:
 After reviewing Step 1 and Step 2, draw complete Manhattan + QQ plots for one population/group.
 
 ```bash
-Rscript scripts/gwas_mlma_qc.R \
+python scripts/gwas_mlma_qc_fast.py \
   --manifest manifest.tsv \
   --outdir qc_step3_full_C6 \
   --threads 4 \
@@ -130,7 +144,7 @@ Rscript scripts/gwas_mlma_qc.R \
 You can also draw one specific population-trait pair:
 
 ```bash
-Rscript scripts/gwas_mlma_qc.R \
+python scripts/gwas_mlma_qc_fast.py \
   --manifest manifest.tsv \
   --outdir qc_step3_full_C6_height \
   --threads 2 \
@@ -144,6 +158,33 @@ Main outputs:
 - `full_plots/`
 - `qc_summary.tsv`
 - `qc_quality_solutions.tsv`
+
+For faster full Manhattan plotting on very large `.mlma` files, the Python script keeps all points with `P <= 1e-4` and samples the remaining points when there are too many:
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest.tsv \
+  --outdir qc_step3_full_C6_fastplot \
+  --threads 4 \
+  --mode full \
+  --only-pop C6 \
+  --max-plot-points 200000 \
+  --plot-keep-p 1e-4
+```
+
+Increase `--max-plot-points` for publication-style figures. Decrease it for faster visual QC.
+
+### R Fallback
+
+The R script supports the same three modes:
+
+```bash
+Rscript scripts/gwas_mlma_qc.R \
+  --manifest manifest.tsv \
+  --outdir qc_step1_metrics_R \
+  --threads 8 \
+  --mode metrics
+```
 
 ## Run QC Legacy One-Step Example
 
@@ -166,6 +207,17 @@ Rscript scripts/gwas_mlma_qc.R \
   --mode metrics
 ```
 
+Fast Python smoke test:
+
+```bash
+python examples/create_smoke_data.py smoke_data
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest smoke_data/manifest.tsv \
+  --outdir qc_test_fast \
+  --threads 2 \
+  --mode qq
+```
+
 ## Input Column Detection
 
 The script automatically recognizes common `.mlma` columns:
@@ -183,7 +235,7 @@ The script automatically recognizes common `.mlma` columns:
 If your files use unusual column names, use the explicit options:
 
 ```bash
-Rscript scripts/gwas_mlma_qc.R \
+python scripts/gwas_mlma_qc_fast.py \
   --manifest manifest.tsv \
   --outdir qc_output \
   --chr-col Chr \
