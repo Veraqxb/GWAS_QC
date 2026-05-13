@@ -43,9 +43,9 @@ Create a tab-separated `manifest.tsv` with these columns:
 
 ```text
 population	trait	file
-pop200	height	/path/to/gwas-results/pop1/height.mlma
-pop500	height	/path/to/gwas-results/pop2/height.mlma
-pop540	height	/path/to/gwas-results/pop3/height.mlma
+pop1	height	/path/to/gwas-results/pop1/height.mlma
+pop2	height	/path/to/gwas-results/pop2/height.mlma
+pop3	height	/path/to/gwas-results/pop3/height.mlma
 ```
 
 Optional columns are allowed and preserved in the output, for example `sample_size`, `batch`, or `note`.
