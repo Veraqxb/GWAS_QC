@@ -57,6 +57,7 @@ SUMMARY_COLUMNS = [
     "qq_shape",
     "qq_interpretation",
     "qq_plot_file",
+    "manhattan_plot_file",
     "full_plot_file",
     "recommendation",
     "quality_class",
@@ -69,10 +70,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fast batch QC for GWAS .mlma files")
     parser.add_argument("--manifest", required=True, help="TSV with population, trait, file columns")
     parser.add_argument("--outdir", required=True, help="Output directory")
-    parser.add_argument("--mode", choices=["metrics", "qq", "full"], default="metrics")
+    parser.add_argument("--mode", choices=["metrics", "qq", "manhattan", "full"], default="metrics")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--only-pop", default=None)
     parser.add_argument("--only-trait", default=None)
+    parser.add_argument("--limit", type=int, default=None, help="Process only the first N manifest rows after filters.")
     parser.add_argument("--p-col", default=None)
     parser.add_argument("--chr-col", default=None)
     parser.add_argument("--bp-col", default=None)
@@ -532,8 +534,7 @@ def downsample_for_plot(chr_arr: np.ndarray, bp: np.ndarray, p: np.ndarray, args
     return chr_arr[idx], bp[idx], p[idx]
 
 
-def make_full_plot(path: str, title: str, output: str, args: argparse.Namespace) -> None:
-    plt = load_pyplot()
+def prepare_manhattan_data(path: str, args: argparse.Namespace) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[float], List[str]]:
     chr_raw, bp, p = read_full_plot_data(path, args)
     chr_arr = normalize_chr(chr_raw)
     chr_arr, bp, p = downsample_for_plot(chr_arr, bp, p, args)
@@ -554,8 +555,31 @@ def make_full_plot(path: str, title: str, output: str, args: argparse.Namespace)
         labels.append(str(chrom))
         cursor += chr_len
     pos = np.asarray([bp_i + offsets.get(chr_i, 0.0) for chr_i, bp_i in zip(chr_arr, bp)])
-    y = -np.log10(p)
+    return chr_arr, pos, p, centers, labels
 
+
+def make_manhattan_plot(path: str, title: str, output: str, args: argparse.Namespace) -> None:
+    plt = load_pyplot()
+    chr_arr, pos, p, centers, labels = prepare_manhattan_data(path, args)
+    y = -np.log10(p)
+    plt.figure(figsize=(9.5, 4.6), dpi=160)
+    colors = np.where(chr_arr % 2 == 0, "#3B6EA8", "#1E1E1E")
+    plt.scatter(pos, y, s=1.8, c=colors, alpha=0.65, linewidths=0)
+    plt.axhline(-math.log10(args.sig_threshold), color="#B83232", linewidth=0.8)
+    plt.title(title, fontsize=9)
+    plt.xlabel("Chromosome")
+    plt.ylabel("-log10(P)")
+    plt.xticks(centers, labels, fontsize=7)
+    plt.tight_layout()
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output)
+    plt.close()
+
+
+def make_full_plot(path: str, title: str, output: str, args: argparse.Namespace) -> None:
+    plt = load_pyplot()
+    chr_arr, pos, p, centers, labels = prepare_manhattan_data(path, args)
+    y = -np.log10(p)
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), dpi=160)
     colors = np.where(chr_arr % 2 == 0, "#3B6EA8", "#1E1E1E")
     axes[0].scatter(pos, y, s=1.8, c=colors, alpha=0.65, linewidths=0)
@@ -590,6 +614,7 @@ def process_one(row: Dict[str, str], args: argparse.Namespace) -> Dict[str, obje
     file_path = row["file"]
     ident = f"{safe_name(population)}__{safe_name(trait)}"
     qq_file = str(Path(args.outdir) / "qq_plots" / safe_name(population) / f"{ident}.qq.png") if args.mode == "qq" else None
+    manhattan_file = str(Path(args.outdir) / "manhattan_plots" / safe_name(population) / f"{ident}.manhattan.png") if args.mode == "manhattan" else None
     full_file = str(Path(args.outdir) / "full_plots" / safe_name(population) / f"{ident}.mqq.png") if args.mode == "full" else None
     base = {
         "population": population,
@@ -598,6 +623,7 @@ def process_one(row: Dict[str, str], args: argparse.Namespace) -> Dict[str, obje
         "status": "ERROR",
         "reasons": None,
         "qq_plot_file": qq_file,
+        "manhattan_plot_file": manhattan_file,
         "full_plot_file": full_file,
         "recommendation": None,
         "quality_class": "ERROR_INPUT",
@@ -620,6 +646,8 @@ def process_one(row: Dict[str, str], args: argparse.Namespace) -> Dict[str, obje
         base.update(qqm)
         if args.mode == "qq":
             make_qq_plot(p_values, f"{population} {trait} {qqm['qq_shape']}", qq_file)
+        if args.mode == "manhattan":
+            make_manhattan_plot(file_path, f"{population} {trait}", manhattan_file, args)
         if args.mode == "full":
             make_full_plot(file_path, f"{population} {trait}", full_file, args)
         base["recommendation"] = recommendation_for(str(base["status"]), str(base["reasons"]))
@@ -670,6 +698,8 @@ def main() -> None:
         rows = [row for row in rows if row["population"] == args.only_pop]
     if args.only_trait:
         rows = [row for row in rows if row["trait"] == args.only_trait]
+    if args.limit is not None:
+        rows = rows[: args.limit]
     if not rows:
         raise SystemExit("No manifest rows remain after filtering.")
 
@@ -678,7 +708,7 @@ def main() -> None:
     print(f"Run mode: {args.mode}", file=sys.stderr)
     print(f"Assessment mode: {args.assessment_mode}", file=sys.stderr)
     print(f"Polars enabled: {'yes' if pl is not None else 'no, using Python csv fallback'}", file=sys.stderr)
-    if args.mode in {"qq", "full"}:
+    if args.mode in {"qq", "manhattan", "full"}:
         try:
             load_pyplot()
         except RuntimeError as exc:
@@ -710,7 +740,7 @@ def main() -> None:
     write_tsv(
         outdir / "qc_recommendations.tsv",
         merged,
-        ["population", "trait", "file", "status", "reasons", "recommendation", "qq_plot_file", "full_plot_file"],
+        ["population", "trait", "file", "status", "reasons", "recommendation", "qq_plot_file", "manhattan_plot_file", "full_plot_file"],
     )
     write_tsv(
         outdir / "qc_quality_solutions.tsv",
@@ -734,6 +764,7 @@ def main() -> None:
             "qq_interpretation",
             "solution",
             "qq_plot_file",
+            "manhattan_plot_file",
             "full_plot_file",
         ],
     )
@@ -753,7 +784,24 @@ def main() -> None:
                 "qq_tail_lift",
                 "qq_interpretation",
                 "qq_plot_file",
+                "manhattan_plot_file",
                 "full_plot_file",
+            ],
+        )
+    if args.mode == "manhattan":
+        write_tsv(
+            outdir / "manhattan_plot_summary.tsv",
+            merged,
+            [
+                "population",
+                "trait",
+                "file",
+                "status",
+                "quality_class",
+                "lambda_gc",
+                "min_p",
+                "n_significant",
+                "manhattan_plot_file",
             ],
         )
     print("Done.", file=sys.stderr)

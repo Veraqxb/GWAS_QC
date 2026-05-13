@@ -80,9 +80,11 @@ The R script is kept as a stable fallback. For large batches, prefer `scripts/gw
 
 For large batches, use the three-step workflow below. It is much faster than drawing Manhattan plots for every `.mlma` file.
 
-### Step 1: Numeric QC Only, Fast Python
+### Step 1: Metrics
 
 This reads each `.mlma` file, calculates QC metrics, and does not draw plots.
+
+Full run:
 
 ```bash
 python scripts/gwas_mlma_qc_fast.py \
@@ -90,6 +92,28 @@ python scripts/gwas_mlma_qc_fast.py \
   --outdir qc_step1_metrics \
   --threads 8 \
   --mode metrics
+```
+
+Partial run by population:
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest.tsv \
+  --outdir qc_step1_metrics_C4 \
+  --threads 4 \
+  --mode metrics \
+  --only-pop C4
+```
+
+Partial run for a quick first-N test:
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest.tsv \
+  --outdir qc_step1_metrics_first4 \
+  --threads 4 \
+  --mode metrics \
+  --limit 4
 ```
 
 For pilot tests on sampled `.mlma` files, use `--assessment-mode sample`. This still calculates lambda GC, minimum P value, valid P count, invalid P count, and significant hit count, but it skips final thresholds that require the complete file, such as total SNP count and excess significant hits.
@@ -123,9 +147,11 @@ Main outputs:
 - `qc_calculated.tsv`
 - `qc_quality_solutions.tsv`
 
-### Step 2: QQ Plots For All Results, Fast Python
+### Step 2: QQ Plots
 
 This draws QQ plots for all manifest rows and classifies the QQ shape.
+
+Full run:
 
 ```bash
 python scripts/gwas_mlma_qc_fast.py \
@@ -133,6 +159,29 @@ python scripts/gwas_mlma_qc_fast.py \
   --outdir qc_step2_qq \
   --threads 4 \
   --mode qq
+```
+
+Partial run by population:
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest.tsv \
+  --outdir qc_step2_qq_C4 \
+  --threads 4 \
+  --mode qq \
+  --only-pop C4
+```
+
+Partial run for one trait:
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest.tsv \
+  --outdir qc_step2_qq_C4_FL1 \
+  --threads 1 \
+  --mode qq \
+  --only-pop C4 \
+  --only-trait FL1
 ```
 
 Main outputs:
@@ -151,17 +200,33 @@ QQ shape classes:
 | `QQ_DEFLATED` | global downward deviation; likely overcorrection or overfitted model |
 | `QQ_NOISY` | irregular curve; check sample size, missingness, convergence, or low-count variants |
 
-### Step 3: Full Manhattan + QQ For One Group
+### Step 3: Manhattan Plots
 
-After reviewing Step 1 and Step 2, draw complete Manhattan + QQ plots for one population/group.
+After reviewing Step 1 and Step 2, draw Manhattan plots. This mode does not redraw QQ plots.
+
+Full run:
 
 ```bash
 python scripts/gwas_mlma_qc_fast.py \
   --manifest manifest.tsv \
-  --outdir qc_step3_full_C6 \
+  --outdir qc_step3_manhattan \
   --threads 4 \
-  --mode full \
-  --only-pop C6
+  --mode manhattan \
+  --max-plot-points 200000 \
+  --plot-keep-p 1e-4
+```
+
+Partial run by population:
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest.tsv \
+  --outdir qc_step3_manhattan_C6 \
+  --threads 4 \
+  --mode manhattan \
+  --only-pop C6 \
+  --max-plot-points 200000 \
+  --plot-keep-p 1e-4
 ```
 
 You can also draw one specific population-trait pair:
@@ -169,33 +234,48 @@ You can also draw one specific population-trait pair:
 ```bash
 python scripts/gwas_mlma_qc_fast.py \
   --manifest manifest.tsv \
-  --outdir qc_step3_full_C6_height \
-  --threads 2 \
-  --mode full \
+  --outdir qc_step3_manhattan_C6_height \
+  --threads 1 \
+  --mode manhattan \
   --only-pop C6 \
-  --only-trait height
+  --only-trait height \
+  --max-plot-points 300000
 ```
 
 Main outputs:
 
-- `full_plots/`
+- `manhattan_plots/`
+- `manhattan_plot_summary.tsv`
 - `qc_summary.tsv`
 - `qc_quality_solutions.tsv`
 
-For faster full Manhattan plotting on very large `.mlma` files, the Python script keeps all points with `P <= 1e-4` and samples the remaining points when there are too many:
+For faster Manhattan plotting on very large `.mlma` files, the Python script keeps all points with `P <= 1e-4` and samples the remaining points when there are too many:
 
 ```bash
 python scripts/gwas_mlma_qc_fast.py \
   --manifest manifest.tsv \
-  --outdir qc_step3_full_C6_fastplot \
+  --outdir qc_step3_manhattan_C6_fastplot \
   --threads 4 \
-  --mode full \
+  --mode manhattan \
   --only-pop C6 \
   --max-plot-points 200000 \
   --plot-keep-p 1e-4
 ```
 
 Increase `--max-plot-points` for publication-style figures. Decrease it for faster visual QC.
+
+### Legacy Combined Plot
+
+The older combined Manhattan + QQ mode is still available if needed:
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest.tsv \
+  --outdir qc_legacy_full_C6 \
+  --threads 4 \
+  --mode full \
+  --only-pop C6
+```
 
 ### R Fallback
 
