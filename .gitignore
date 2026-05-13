@@ -1,0 +1,7 @@
+qc_output/
+qc_test/
+qc_example/
+smoke_data/
+*.RData
+*.Rhistory
+.DS_Store

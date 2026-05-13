@@ -1,0 +1,8 @@
+parameter	default_value	description
+lambda_warn_high	1.10	Borderline genomic inflation; inspect QQ plot and covariates.
+lambda_fail_high	1.20	Severe genomic inflation; rerun or investigate before downstream interpretation.
+lambda_warn_low	0.95	Borderline deflation; inspect for overcorrection.
+lambda_fail_low	0.90	Severe deflation; likely overcorrection or model issue.
+min_snps_warn	50000	Warn if fewer valid P values than this.
+min_snps_fail	10000	Fail if fewer valid P values than this.
+sig_threshold	5e-8	Genome-wide significance line in Manhattan plot.
