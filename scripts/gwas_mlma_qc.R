@@ -14,7 +14,10 @@ Required:
   --outdir DIR                 Output directory
 
 Optional:
+  --mode MODE                   metrics, qq, or full; default metrics
   --threads N                  Parallel workers, default 1
+  --only-pop VALUE             Optional population filter for plotting one group
+  --only-trait VALUE           Optional trait filter for plotting one trait
   --chr-col NAME               Chromosome column override
   --bp-col NAME                Base-pair position column override
   --snp-col NAME               SNP ID column override
@@ -30,13 +33,16 @@ Optional:
   --help                       Show help
 
 Example:
-  Rscript scripts/gwas_mlma_qc.R --manifest manifest.tsv --outdir qc_output --threads 8
+  Rscript scripts/gwas_mlma_qc.R --manifest manifest.tsv --outdir qc_output --threads 8 --mode metrics
 ")
 }
 
 parse_args <- function(args) {
   out <- list(
+    mode = "metrics",
     threads = 1L,
+    only_pop = NA_character_,
+    only_trait = NA_character_,
     chr_col = NA_character_,
     bp_col = NA_character_,
     snp_col = NA_character_,
@@ -80,6 +86,9 @@ parse_args <- function(args) {
     out[[key]] <- as.integer(out[[key]])
   }
   out$save_cleaned <- tolower(as.character(out$save_cleaned)) %in% c("true", "t", "1", "yes", "y")
+  if (!out$mode %in% c("metrics", "qq", "full")) {
+    stop("--mode must be one of: metrics, qq, full")
+  }
   out
 }
 
@@ -113,7 +122,72 @@ observed_qq <- function(p) {
   -log10(sort(p))
 }
 
-make_plot <- function(d, chr_col, bp_col, p_col, title, out_file, sig_threshold) {
+qq_metrics <- function(p) {
+  p <- p[!is.na(p) & is.finite(p) & p > 0 & p <= 1]
+  n <- length(p)
+  if (n < 10L) {
+    return(list(
+      qq_body_median_delta = NA_real_,
+      qq_body_rmse = NA_real_,
+      qq_tail_lift = NA_real_,
+      qq_shape = "UNCLASSIFIED",
+      qq_interpretation = "Too few valid P values for QQ curve classification."
+    ))
+  }
+  qq_dt <- data.table(expected = expected_qq(n), observed = observed_qq(p))
+  qq_dt[, delta := observed - expected]
+  body_dt <- qq_dt[expected >= 0.1 & expected <= 2]
+  if (nrow(body_dt) == 0L) {
+    body_dt <- qq_dt[seq_len(max(1L, floor(n * 0.9)))]
+  }
+  tail_dt <- qq_dt[expected > 2]
+  body_median_delta <- median(body_dt$delta, na.rm = TRUE)
+  body_rmse <- sqrt(mean(body_dt$delta^2, na.rm = TRUE))
+  tail_lift <- if (nrow(tail_dt) > 0L) max(tail_dt$delta, na.rm = TRUE) else NA_real_
+
+  shape <- "QQ_IDEAL"
+  interpretation <- "QQ body follows the null expectation; tail deviation, if present, is compatible with possible association signal."
+  if (is.finite(body_median_delta) && body_median_delta > 0.25) {
+    shape <- "QQ_INFLATED"
+    interpretation <- "QQ body is globally above the diagonal, suggesting population structure, relatedness, batch effects, or phenotype confounding."
+  } else if (is.finite(body_median_delta) && body_median_delta < -0.25) {
+    shape <- "QQ_DEFLATED"
+    interpretation <- "QQ body is below the diagonal, suggesting overcorrection, overfitted kinship, or overly aggressive phenotype residualization."
+  } else if (is.finite(body_rmse) && body_rmse > 0.35) {
+    shape <- "QQ_NOISY"
+    interpretation <- "QQ curve is irregular; review sample size, model convergence, and missingness."
+  } else if (is.finite(tail_lift) && tail_lift > 1.0) {
+    shape <- "QQ_GOOD_WITH_TAIL_SIGNAL"
+    interpretation <- "QQ body is acceptable with strong tail deviation; this can be a real association signal if Manhattan plot is localized."
+  }
+
+  list(
+    qq_body_median_delta = body_median_delta,
+    qq_body_rmse = body_rmse,
+    qq_tail_lift = tail_lift,
+    qq_shape = shape,
+    qq_interpretation = interpretation
+  )
+}
+
+make_qq_plot <- function(p, title, out_file) {
+  p <- p[!is.na(p) & is.finite(p) & p > 0 & p <= 1]
+  qq_dt <- data.table(expected = expected_qq(length(p)), observed = observed_qq(p))
+  max_axis <- max(qq_dt$expected, qq_dt$observed, na.rm = TRUE)
+  p1 <- ggplot(qq_dt, aes(x = expected, y = observed)) +
+    geom_abline(slope = 1, intercept = 0, color = "#777777", linewidth = 0.4) +
+    geom_point(size = 0.45, alpha = 0.75, color = "#3B6EA8") +
+    coord_equal(xlim = c(0, max_axis), ylim = c(0, max_axis)) +
+    labs(title = title, x = expression(Expected~~-log[10](P)), y = expression(Observed~~-log[10](P))) +
+    theme_bw(base_size = 10) +
+    theme(plot.title = element_text(size = 11))
+
+  png(out_file, width = 1000, height = 950, res = 170)
+  print(p1)
+  dev.off()
+}
+
+make_full_plot <- function(d, chr_col, bp_col, p_col, title, out_file, sig_threshold) {
   plot_dt <- d[, .(
     chr_raw = get(chr_col),
     bp = as.numeric(get(bp_col)),
@@ -188,14 +262,59 @@ recommendation_for <- function(status, reasons) {
   "No automated issue detected. Keep genotype-level QC and model logs for audit."
 }
 
+solution_for <- function(status, reasons, qq_shape) {
+  if (status == "ERROR") {
+    return("File or column problem: verify file path, required MLMA columns, delimiters, and whether the GWAS job finished successfully.")
+  }
+  if (grepl("too_few_valid_snps|many_invalid_p", reasons)) {
+    return("Data completeness problem: check genotype filtering, imputation INFO/MAF thresholds, sample ID matching, chromosome inclusion, and model convergence logs; rerun affected GWAS after fixing input completeness.")
+  }
+  if (grepl("lambda_gc_high", reasons) || qq_shape == "QQ_INFLATED") {
+    return("Inflation problem: add/check PCA covariates, batch/plate/field covariates, sex/age if relevant, GRM/kinship construction, duplicate/close relatives, and phenotype outliers; rerun by population and meta-analyze if structure differs.")
+  }
+  if (grepl("lambda_gc_low", reasons) || qq_shape == "QQ_DEFLATED") {
+    return("Deflation problem: reduce redundant covariates, inspect overfitted kinship or overly aggressive residualization, and verify phenotype transformation did not remove true genetic signal.")
+  }
+  if (grepl("many_significant", reasons)) {
+    return("Excess signal problem: test phenotype association with batch/plate/family/source variables, inspect outliers, and use full Manhattan plots to confirm whether peaks are localized rather than genome-wide artifacts.")
+  }
+  if (qq_shape == "QQ_GOOD_WITH_TAIL_SIGNAL") {
+    return("Likely acceptable with candidate signal: draw full Manhattan+QQ for this population/trait, check whether signals are localized, then annotate candidate loci.")
+  }
+  if (qq_shape == "QQ_NOISY") {
+    return("Noisy QQ problem: check sample size, missingness, convergence, low MAC variants, and rerun with stricter variant filters if needed.")
+  }
+  if (status == "PASS") {
+    return("Accept for downstream review; keep model logs and genotype-level QC records.")
+  }
+  "Review QQ plot together with numeric QC metrics; rerun full Manhattan+QQ for this group/trait before deciding."
+}
+
+quality_class_for <- function(status, reasons, qq_shape) {
+  if (status == "ERROR") return("ERROR_INPUT")
+  if (grepl("too_few_valid_snps_fail", reasons) || (status == "FAIL" && grepl("many_invalid_p", reasons))) {
+    return("FAIL_DATA_COMPLETENESS")
+  }
+  if (grepl("too_few_valid_snps_warn|many_invalid_p", reasons)) return("WARN_DATA_COMPLETENESS")
+  if (grepl("lambda_gc_high", reasons) || qq_shape == "QQ_INFLATED") return("FAIL_OR_WARN_INFLATION")
+  if (grepl("lambda_gc_low", reasons) || qq_shape == "QQ_DEFLATED") return("FAIL_OR_WARN_DEFLATION")
+  if (grepl("many_significant", reasons)) return("WARN_EXCESS_SIGNAL")
+  if (qq_shape == "QQ_GOOD_WITH_TAIL_SIGNAL") return("PASS_WITH_TAIL_SIGNAL")
+  if (qq_shape == "QQ_NOISY") return("WARN_NOISY_QQ")
+  if (status == "PASS") return("PASS_IDEAL")
+  "REVIEW"
+}
+
 qc_one <- function(row, args) {
   population <- as.character(row$population)
   trait <- as.character(row$trait)
   file <- as.character(row$file)
   id <- paste(safe_name(population), safe_name(trait), sep = "__")
-  plot_dir <- file.path(args$outdir, "plots", safe_name(population))
+  qq_dir <- file.path(args$outdir, "qq_plots", safe_name(population))
+  full_dir <- file.path(args$outdir, "full_plots", safe_name(population))
   cleaned_dir <- file.path(args$outdir, "cleaned", safe_name(population))
-  dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+  if (args$mode == "qq") dir.create(qq_dir, recursive = TRUE, showWarnings = FALSE)
+  if (args$mode == "full") dir.create(full_dir, recursive = TRUE, showWarnings = FALSE)
   if (args$save_cleaned) {
     dir.create(cleaned_dir, recursive = TRUE, showWarnings = FALSE)
   }
@@ -213,8 +332,16 @@ qc_one <- function(row, args) {
     n_significant = NA_integer_,
     lambda_gc = NA_real_,
     median_chisq = NA_real_,
-    plot_file = file.path(plot_dir, paste0(id, ".mqq.png")),
-    recommendation = NA_character_
+    qq_body_median_delta = NA_real_,
+    qq_body_rmse = NA_real_,
+    qq_tail_lift = NA_real_,
+    qq_shape = NA_character_,
+    qq_interpretation = NA_character_,
+    qq_plot_file = if (args$mode == "qq") file.path(qq_dir, paste0(id, ".qq.png")) else NA_character_,
+    full_plot_file = if (args$mode == "full") file.path(full_dir, paste0(id, ".mqq.png")) else NA_character_,
+    recommendation = NA_character_,
+    quality_class = NA_character_,
+    solution = NA_character_
   )
 
   tryCatch({
@@ -222,9 +349,11 @@ qc_one <- function(row, args) {
       stop("File does not exist")
     }
     d <- fread(file, showProgress = FALSE)
-    chr_col <- find_col(d, args$chr_col, c("Chr", "CHR", "chrom", "chromosome", "chromosome_name"), "chromosome")
-    bp_col <- find_col(d, args$bp_col, c("bp", "BP", "pos", "POS", "position"), "position")
-    snp_col <- find_col(d, args$snp_col, c("SNP", "snp", "rs", "ID", "id", "marker", "variant"), "SNP")
+    if (args$mode == "full") {
+      chr_col <- find_col(d, args$chr_col, c("Chr", "CHR", "chrom", "chromosome", "chromosome_name"), "chromosome")
+      bp_col <- find_col(d, args$bp_col, c("bp", "BP", "pos", "POS", "position"), "position")
+      snp_col <- find_col(d, args$snp_col, c("SNP", "snp", "rs", "ID", "id", "marker", "variant"), "SNP")
+    }
     p_col <- find_col(d, args$p_col, c("p", "P", "pval", "PVAL", "p_value", "p.value"), "P-value")
 
     total_rows <- nrow(d)
@@ -276,15 +405,33 @@ qc_one <- function(row, args) {
       reasons <- c(reasons, "many_significant")
     }
 
-    make_plot(
-      d_valid,
-      chr_col = chr_col,
-      bp_col = bp_col,
-      p_col = p_col,
-      title = paste(population, trait),
-      out_file = base_result$plot_file,
-      sig_threshold = args$sig_threshold
+    qqm <- if (args$mode %in% c("qq", "full")) qq_metrics(p_valid) else list(
+      qq_body_median_delta = NA_real_,
+      qq_body_rmse = NA_real_,
+      qq_tail_lift = NA_real_,
+      qq_shape = NA_character_,
+      qq_interpretation = NA_character_
     )
+
+    if (args$mode == "qq") {
+      make_qq_plot(
+        p_valid,
+        title = paste(population, trait, qqm$qq_shape),
+        out_file = base_result$qq_plot_file
+      )
+    }
+
+    if (args$mode == "full") {
+      make_full_plot(
+        d_valid,
+        chr_col = chr_col,
+        bp_col = bp_col,
+        p_col = p_col,
+        title = paste(population, trait),
+        out_file = base_result$full_plot_file,
+        sig_threshold = args$sig_threshold
+      )
+    }
 
     if (args$save_cleaned) {
       fwrite(d_valid, file.path(cleaned_dir, paste0(id, ".valid.tsv.gz")), sep = "\t")
@@ -296,6 +443,8 @@ qc_one <- function(row, args) {
       reasons_text <- paste(unique(reasons), collapse = ";")
     }
     qc_recommendation <- recommendation_for(qc_status, reasons_text)
+    q_class <- quality_class_for(qc_status, reasons_text, qqm$qq_shape)
+    q_solution <- solution_for(qc_status, reasons_text, qqm$qq_shape)
     base_result[, `:=`(
       status = qc_status,
       reasons = reasons_text,
@@ -306,13 +455,22 @@ qc_one <- function(row, args) {
       n_significant = n_sig,
       lambda_gc = gc_lambda,
       median_chisq = med_chisq,
-      recommendation = qc_recommendation
+      qq_body_median_delta = qqm$qq_body_median_delta,
+      qq_body_rmse = qqm$qq_body_rmse,
+      qq_tail_lift = qqm$qq_tail_lift,
+      qq_shape = qqm$qq_shape,
+      qq_interpretation = qqm$qq_interpretation,
+      recommendation = qc_recommendation,
+      quality_class = q_class,
+      solution = q_solution
     )]
     base_result
   }, error = function(e) {
     base_result[, `:=`(
       reasons = conditionMessage(e),
-      recommendation = recommendation_for("ERROR", conditionMessage(e))
+      recommendation = recommendation_for("ERROR", conditionMessage(e)),
+      quality_class = "ERROR_INPUT",
+      solution = solution_for("ERROR", conditionMessage(e), NA_character_)
     )]
     base_result
   })
@@ -332,8 +490,19 @@ if (length(missing_cols) > 0L) {
   stop("Manifest is missing required columns: ", paste(missing_cols, collapse = ", "))
 }
 
+if (!is.na(args$only_pop) && nzchar(args$only_pop)) {
+  manifest <- manifest[population == args$only_pop]
+}
+if (!is.na(args$only_trait) && nzchar(args$only_trait)) {
+  manifest <- manifest[trait == args$only_trait]
+}
+if (nrow(manifest) == 0L) {
+  stop("No manifest rows remain after --only-pop/--only-trait filtering.")
+}
+
 message("Loaded manifest rows: ", nrow(manifest))
 message("Output directory: ", normalizePath(args$outdir, mustWork = FALSE))
+message("Run mode: ", args$mode)
 
 rows <- split(manifest, seq_len(nrow(manifest)))
 if (args$threads > 1L) {
@@ -349,10 +518,31 @@ fwrite(summary_dt[status == "FAIL"], file.path(args$outdir, "qc_fail.tsv"), sep 
 fwrite(summary_dt[status == "WARN"], file.path(args$outdir, "qc_warn.tsv"), sep = "\t")
 fwrite(summary_dt[status == "PASS"], file.path(args$outdir, "qc_pass.tsv"), sep = "\t")
 fwrite(
-  summary_dt[, .(population, trait, file, status, reasons, recommendation, plot_file)],
+  summary_dt[, .(population, trait, file, status, reasons, recommendation, qq_plot_file, full_plot_file)],
   file.path(args$outdir, "qc_recommendations.tsv"),
   sep = "\t"
 )
+fwrite(
+  summary_dt[, .(
+    population, trait, file, status, reasons, quality_class,
+    lambda_gc, n_valid_p, n_invalid_p, min_p, n_significant,
+    qq_shape, qq_body_median_delta, qq_body_rmse, qq_tail_lift,
+    qq_interpretation, solution, qq_plot_file, full_plot_file
+  )],
+  file.path(args$outdir, "qc_quality_solutions.tsv"),
+  sep = "\t"
+)
+if (args$mode %in% c("qq", "full")) {
+  fwrite(
+    summary_dt[, .(
+      population, trait, file, status, quality_class,
+      qq_shape, qq_body_median_delta, qq_body_rmse, qq_tail_lift,
+      qq_interpretation, qq_plot_file, full_plot_file
+    )],
+    file.path(args$outdir, "qq_shape_summary.tsv"),
+    sep = "\t"
+  )
+}
 
 message("Done.")
 message("PASS: ", nrow(summary_dt[status == "PASS"]))

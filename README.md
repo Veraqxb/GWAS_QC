@@ -64,13 +64,97 @@ Rscript -e 'install.packages(c("data.table", "ggplot2"), repos="https://cloud.r-
 
 No other R packages are required.
 
-## Run QC
+## Three-Step QC Workflow
+
+For large batches, use the three-step workflow below. It is much faster than drawing Manhattan plots for every `.mlma` file.
+
+### Step 1: Numeric QC Only
+
+This reads each `.mlma` file, calculates QC metrics, and does not draw plots.
+
+```bash
+Rscript scripts/gwas_mlma_qc.R \
+  --manifest manifest.tsv \
+  --outdir qc_step1_metrics \
+  --threads 8 \
+  --mode metrics
+```
+
+Main outputs:
+
+- `qc_summary.tsv`
+- `qc_pass.tsv`
+- `qc_warn.tsv`
+- `qc_fail.tsv`
+- `qc_quality_solutions.tsv`
+
+### Step 2: QQ Plots For All Results
+
+This draws QQ plots for all manifest rows and classifies the QQ shape.
+
+```bash
+Rscript scripts/gwas_mlma_qc.R \
+  --manifest manifest.tsv \
+  --outdir qc_step2_qq \
+  --threads 4 \
+  --mode qq
+```
+
+Main outputs:
+
+- `qq_plots/`
+- `qq_shape_summary.tsv`
+- `qc_quality_solutions.tsv`
+
+QQ shape classes:
+
+| QQ class | Meaning |
+|---|---|
+| `QQ_IDEAL` | QQ body follows the diagonal; acceptable for downstream review |
+| `QQ_GOOD_WITH_TAIL_SIGNAL` | QQ body is acceptable, with strong tail deviation compatible with true loci |
+| `QQ_INFLATED` | global upward deviation; likely structure, relatedness, batch effect, or confounding |
+| `QQ_DEFLATED` | global downward deviation; likely overcorrection or overfitted model |
+| `QQ_NOISY` | irregular curve; check sample size, missingness, convergence, or low-count variants |
+
+### Step 3: Full Manhattan + QQ For One Group
+
+After reviewing Step 1 and Step 2, draw complete Manhattan + QQ plots for one population/group.
+
+```bash
+Rscript scripts/gwas_mlma_qc.R \
+  --manifest manifest.tsv \
+  --outdir qc_step3_full_C6 \
+  --threads 4 \
+  --mode full \
+  --only-pop C6
+```
+
+You can also draw one specific population-trait pair:
+
+```bash
+Rscript scripts/gwas_mlma_qc.R \
+  --manifest manifest.tsv \
+  --outdir qc_step3_full_C6_height \
+  --threads 2 \
+  --mode full \
+  --only-pop C6 \
+  --only-trait height
+```
+
+Main outputs:
+
+- `full_plots/`
+- `qc_summary.tsv`
+- `qc_quality_solutions.tsv`
+
+## Run QC Legacy One-Step Example
 
 ```bash
 Rscript scripts/gwas_mlma_qc.R \
   --manifest manifest.tsv \
   --outdir qc_output \
-  --threads 8
+  --threads 8 \
+  --mode full
 ```
 
 For small test runs:
@@ -80,7 +164,8 @@ Rscript examples/create_smoke_data.R smoke_data
 Rscript scripts/gwas_mlma_qc.R \
   --manifest smoke_data/manifest.tsv \
   --outdir qc_test \
-  --threads 2
+  --threads 2 \
+  --mode metrics
 ```
 
 ## Input Column Detection
@@ -137,6 +222,7 @@ You can override thresholds:
 Rscript scripts/gwas_mlma_qc.R \
   --manifest manifest.tsv \
   --outdir qc_output \
+  --mode metrics \
   --lambda-warn-high 1.10 \
   --lambda-fail-high 1.20 \
   --lambda-warn-low 0.95 \
@@ -155,6 +241,23 @@ Rscript scripts/gwas_mlma_qc.R \
 | One chromosome or region has broad elevation | map/build mismatch, local genotyping artifact, structural region, low-quality imputation | check genome build, allele coding, INFO/MAF/missingness; rerun excluding problematic low-quality SNPs |
 | Very few SNPs or many invalid P values | file truncation, ID mismatch, overly strict filtering, model convergence failures | check input genotype filters, sample ID matching, model logs, and per-file line counts |
 | Only small sample population is noisy | low power and unstable estimates | use as sensitivity analysis; prioritize larger groups or meta-analysis |
+
+## Final Quality Classes
+
+The file `qc_quality_solutions.tsv` summarizes the combined quality decision and recommended action.
+
+| Quality class | Interpretation | Main action |
+|---|---|---|
+| `PASS_IDEAL` | Numeric QC passes; no major QQ problem detected | Keep for downstream analysis |
+| `PASS_WITH_TAIL_SIGNAL` | QQ body is good with tail signal | Draw full Manhattan + QQ and inspect whether peaks are localized |
+| `WARN_EXCESS_SIGNAL` | Too many significant SNPs | Check phenotype-batch associations and outliers |
+| `WARN_NOISY_QQ` | QQ is irregular | Check sample size, missingness, low MAC variants, and convergence |
+| `FAIL_OR_WARN_INFLATION` | Lambda/QQ inflation | Add/check PCs, kinship, batch covariates, and population-specific analysis |
+| `FAIL_OR_WARN_DEFLATION` | Lambda/QQ deflation | Check overcorrection, residualization, and overfitted mixed model |
+| `WARN_DATA_COMPLETENESS` | Fewer SNPs or more invalid P values than expected | Check filters and logs; may still be usable after review |
+| `FAIL_DATA_COMPLETENESS` | Too few valid SNPs or many invalid P values | Check file completeness, SNP filters, imputation/MAF thresholds, and model logs |
+| `ERROR_INPUT` | File or column problem | Check path, delimiter, and required MLMA columns |
+| `REVIEW` | Borderline mixed signals | Review QQ plus full Manhattan plot |
 
 ## Suggested Review Workflow
 
