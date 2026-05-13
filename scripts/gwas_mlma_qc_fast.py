@@ -61,6 +61,7 @@ SUMMARY_COLUMNS = [
     "recommendation",
     "quality_class",
     "solution",
+    "assessment_mode",
 ]
 
 
@@ -85,6 +86,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sig-threshold", type=float, default=5e-8)
     parser.add_argument("--max-plot-points", type=int, default=200000)
     parser.add_argument("--plot-keep-p", type=float, default=1e-4)
+    parser.add_argument(
+        "--assessment-mode",
+        choices=["full", "sample", "calculate"],
+        default="full",
+        help="full applies all QC thresholds; sample skips full-file SNP-count/excess-hit thresholds; calculate only reports metrics.",
+    )
     return parser.parse_args()
 
 
@@ -342,14 +349,19 @@ def classify_metrics(p_values: np.ndarray, n_rows: int, args: argparse.Namespace
     reasons: List[str] = []
     status = "PASS"
 
-    if n_valid < args.min_snps_fail:
+    if args.assessment_mode == "calculate":
+        status = "CALCULATED"
+        reasons.append("calculate_only_no_threshold_classification")
+    elif args.assessment_mode == "sample":
+        reasons.append("sample_mode_skip_count_thresholds")
+    elif n_valid < args.min_snps_fail:
         status = "FAIL"
         reasons.append("too_few_valid_snps_fail")
     elif n_valid < args.min_snps_warn:
         status = "WARN"
         reasons.append("too_few_valid_snps_warn")
 
-    if n_rows > 0 and n_invalid / n_rows > 0.05:
+    if args.assessment_mode != "calculate" and n_rows > 0 and n_invalid / n_rows > 0.05:
         status = "FAIL" if n_invalid / n_rows > 0.20 else ("WARN" if status == "PASS" else status)
         reasons.append("many_invalid_p")
 
@@ -365,7 +377,7 @@ def classify_metrics(p_values: np.ndarray, n_rows: int, args: argparse.Namespace
         min_p = None
         n_sig = 0
 
-    if lambda_gc is not None and math.isfinite(lambda_gc):
+    if args.assessment_mode != "calculate" and lambda_gc is not None and math.isfinite(lambda_gc):
         if lambda_gc >= args.lambda_fail_high:
             status = "FAIL"
             reasons.append("lambda_gc_high_fail")
@@ -379,7 +391,11 @@ def classify_metrics(p_values: np.ndarray, n_rows: int, args: argparse.Namespace
             status = "WARN"
             reasons.append("lambda_gc_low_warn")
 
-    if n_valid and n_sig > max(50, math.ceil(n_valid * 0.001)):
+    if args.assessment_mode == "calculate":
+        pass
+    elif args.assessment_mode == "sample":
+        pass
+    elif n_valid and n_sig > max(50, math.ceil(n_valid * 0.001)):
         if status == "PASS":
             status = "WARN"
         reasons.append("many_significant")
@@ -399,6 +415,10 @@ def classify_metrics(p_values: np.ndarray, n_rows: int, args: argparse.Namespace
 
 
 def recommendation_for(status: str, reasons: str) -> str:
+    if status == "CALCULATED":
+        return "Metrics were calculated without threshold-based classification. Use full-file mode for final QC classification."
+    if "sample_mode_skip_count_thresholds" in reasons:
+        return "Sample-mode metrics were calculated without full-file SNP-count or excess-hit thresholds. Use this for pilot checks, then rerun full files for final QC."
     if status == "ERROR":
         return "Check whether the file exists, is readable, and contains required MLMA columns."
     if "lambda_gc_high" in reasons:
@@ -417,6 +437,8 @@ def recommendation_for(status: str, reasons: str) -> str:
 
 
 def quality_class_for(status: str, reasons: str, qq_shape: Optional[str]) -> str:
+    if status == "CALCULATED":
+        return "METRICS_ONLY"
     if status == "ERROR":
         return "ERROR_INPUT"
     if "too_few_valid_snps_fail" in reasons or (status == "FAIL" and "many_invalid_p" in reasons):
@@ -439,6 +461,8 @@ def quality_class_for(status: str, reasons: str, qq_shape: Optional[str]) -> str
 
 
 def solution_for(status: str, reasons: str, qq_shape: Optional[str]) -> str:
+    if status == "CALCULATED":
+        return "No action assigned because this run only calculated metrics. Rerun with --assessment-mode sample for pilot classification or full for final classification."
     if status == "ERROR":
         return "File or column problem: verify file path, required MLMA columns, delimiters, and whether the GWAS job finished successfully."
     if "too_few_valid_snps" in reasons or "many_invalid_p" in reasons:
@@ -578,6 +602,7 @@ def process_one(row: Dict[str, str], args: argparse.Namespace) -> Dict[str, obje
         "recommendation": None,
         "quality_class": "ERROR_INPUT",
         "solution": None,
+        "assessment_mode": args.assessment_mode,
     }
     try:
         if not os.path.exists(file_path):
@@ -609,6 +634,33 @@ def process_one(row: Dict[str, str], args: argparse.Namespace) -> Dict[str, obje
         return base
 
 
+def print_result_preview(rows: List[Dict[str, object]]) -> None:
+    print("", file=sys.stderr)
+    print("Metric preview:", file=sys.stderr)
+    header = ["population", "trait", "status", "n_valid_p", "lambda_gc", "min_p", "n_significant", "reasons"]
+    print("\t".join(header), file=sys.stderr)
+    for row in rows[:20]:
+        lambda_gc = row.get("lambda_gc")
+        min_p = row.get("min_p")
+        print(
+            "\t".join(
+                [
+                    str(row.get("population", "")),
+                    str(row.get("trait", "")),
+                    str(row.get("status", "")),
+                    str(row.get("n_valid_p", "")),
+                    "" if lambda_gc in (None, "") else f"{float(lambda_gc):.4g}",
+                    "" if min_p in (None, "") else f"{float(min_p):.4g}",
+                    str(row.get("n_significant", "")),
+                    str(row.get("reasons", "")),
+                ]
+            ),
+            file=sys.stderr,
+        )
+    if len(rows) > 20:
+        print(f"... {len(rows) - 20} more rows written to qc_summary.tsv", file=sys.stderr)
+
+
 def main() -> None:
     args = parse_args()
     outdir = Path(args.outdir)
@@ -624,6 +676,7 @@ def main() -> None:
     print(f"Loaded manifest rows: {len(rows)}", file=sys.stderr)
     print(f"Output directory: {outdir.resolve()}", file=sys.stderr)
     print(f"Run mode: {args.mode}", file=sys.stderr)
+    print(f"Assessment mode: {args.assessment_mode}", file=sys.stderr)
     print(f"Polars enabled: {'yes' if pl is not None else 'no, using Python csv fallback'}", file=sys.stderr)
     if args.mode in {"qq", "full"}:
         try:
@@ -653,6 +706,7 @@ def main() -> None:
     write_tsv(outdir / "qc_pass.tsv", [row for row in merged if row["status"] == "PASS"], fieldnames)
     write_tsv(outdir / "qc_warn.tsv", [row for row in merged if row["status"] == "WARN"], fieldnames)
     write_tsv(outdir / "qc_fail.tsv", [row for row in merged if row["status"] == "FAIL"], fieldnames)
+    write_tsv(outdir / "qc_calculated.tsv", [row for row in merged if row["status"] == "CALCULATED"], fieldnames)
     write_tsv(
         outdir / "qc_recommendations.tsv",
         merged,
@@ -703,10 +757,9 @@ def main() -> None:
             ],
         )
     print("Done.", file=sys.stderr)
-    print(f"PASS: {sum(row['status'] == 'PASS' for row in merged)}", file=sys.stderr)
-    print(f"WARN: {sum(row['status'] == 'WARN' for row in merged)}", file=sys.stderr)
-    print(f"FAIL: {sum(row['status'] == 'FAIL' for row in merged)}", file=sys.stderr)
-    print(f"ERROR: {sum(row['status'] == 'ERROR' for row in merged)}", file=sys.stderr)
+    print_result_preview(merged)
+    for status in ["PASS", "WARN", "FAIL", "ERROR", "CALCULATED"]:
+        print(f"{status}: {sum(row['status'] == status for row in merged)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

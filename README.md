@@ -92,12 +92,35 @@ python scripts/gwas_mlma_qc_fast.py \
   --mode metrics
 ```
 
+For pilot tests on sampled `.mlma` files, use `--assessment-mode sample`. This still calculates lambda GC, minimum P value, valid P count, invalid P count, and significant hit count, but it skips final thresholds that require the complete file, such as total SNP count and excess significant hits.
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest_sample100k.tsv \
+  --outdir qc_sample100k_metrics \
+  --threads 4 \
+  --mode metrics \
+  --assessment-mode sample
+```
+
+To calculate metrics only and avoid all PASS/WARN/FAIL classification:
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest_sample100k.tsv \
+  --outdir qc_sample100k_calculate \
+  --threads 4 \
+  --mode metrics \
+  --assessment-mode calculate
+```
+
 Main outputs:
 
 - `qc_summary.tsv`
 - `qc_pass.tsv`
 - `qc_warn.tsv`
 - `qc_fail.tsv`
+- `qc_calculated.tsv`
 - `qc_quality_solutions.tsv`
 
 ### Step 2: QQ Plots For All Results, Fast Python
