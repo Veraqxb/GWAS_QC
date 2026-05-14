@@ -33,6 +33,11 @@ try:
 except ImportError:  # pragma: no cover
     pl = None
 
+try:
+    import cupy as cp
+except ImportError:  # pragma: no cover
+    cp = None
+
 
 P_CANDIDATES = ["p", "P", "pval", "PVAL", "p_value", "p.value"]
 CHR_CANDIDATES = ["Chr", "CHR", "chrom", "chromosome", "chromosome_name"]
@@ -88,6 +93,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sig-threshold", type=float, default=5e-8)
     parser.add_argument("--max-plot-points", type=int, default=200000)
     parser.add_argument("--plot-keep-p", type=float, default=1e-4)
+    parser.add_argument("--qq-max-points", type=int, default=100000, help="Maximum points drawn in each QQ plot.")
+    parser.add_argument("--qq-ci-points", type=int, default=2000, help="Number of points used for QQ confidence interval ribbons.")
+    parser.add_argument("--qq-confidence", type=float, default=0.95, help="QQ confidence interval level.")
+    parser.add_argument("--qq-engine", choices=["auto", "cpu", "gpu"], default="auto", help="Use CuPy GPU sorting for QQ when available.")
+    parser.add_argument("--plot-dpi", type=int, default=180)
     parser.add_argument(
         "--assessment-mode",
         choices=["full", "sample", "calculate"],
@@ -193,6 +203,13 @@ def p_to_chisq(p_values: np.ndarray) -> np.ndarray:
     return z * z
 
 
+def p_to_chisq_scalar(p_value: float) -> float:
+    clipped = min(max(float(p_value), np.nextafter(0, 1)), 1.0)
+    if chi2 is not None:
+        return float(chi2.isf(clipped, 1))
+    return float(p_to_chisq(np.asarray([clipped]))[0])
+
+
 def read_p_values(path: str, p_override: Optional[str]) -> Tuple[np.ndarray, int, str]:
     header, delimiter = read_header(path)
     if pl is not None and delimiter is not None:
@@ -296,8 +313,51 @@ def observed_qq(p_values: np.ndarray) -> np.ndarray:
     return -np.log10(np.sort(p_values))
 
 
-def qq_metrics(p_values: np.ndarray) -> Dict[str, object]:
-    p = p_values[np.isfinite(p_values) & (p_values > 0) & (p_values <= 1)]
+def valid_p_values(p_values: np.ndarray) -> np.ndarray:
+    return p_values[np.isfinite(p_values) & (p_values > 0) & (p_values <= 1)]
+
+
+def sort_p_values(p_values: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    p = valid_p_values(p_values)
+    if len(p) == 0:
+        return p
+    use_gpu = args.qq_engine == "gpu" or (args.qq_engine == "auto" and cp is not None and len(p) >= 1_000_000)
+    if use_gpu:
+        if cp is None:
+            raise RuntimeError("Requested --qq-engine gpu, but CuPy is not installed.")
+        return cp.asnumpy(cp.sort(cp.asarray(p)))
+    return np.sort(p)
+
+
+def qq_plot_indices(n: int, max_points: int) -> np.ndarray:
+    if n <= max_points:
+        return np.arange(n)
+    tail_n = min(max_points // 2, 50000, n)
+    body_n = max_points - tail_n
+    body = np.unique(np.linspace(0, n - tail_n - 1, max(1, body_n), dtype=int))
+    tail = np.arange(max(0, n - tail_n), n, dtype=int)
+    return np.unique(np.concatenate([body, tail]))
+
+
+def qq_ci_band(n: int, idx: np.ndarray, confidence: float) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    if chi2 is None:
+        return None, None
+    try:
+        from scipy.stats import beta
+    except ImportError:
+        return None, None
+    alpha = 1.0 - confidence
+    ranks = idx + 1
+    lower_p = beta.ppf(alpha / 2.0, ranks, n + 1 - ranks)
+    upper_p = beta.ppf(1.0 - alpha / 2.0, ranks, n + 1 - ranks)
+    lower_p = np.clip(lower_p, np.nextafter(0, 1), 1.0)
+    upper_p = np.clip(upper_p, np.nextafter(0, 1), 1.0)
+    # P-value bounds invert on the -log10 scale.
+    return -np.log10(upper_p), -np.log10(lower_p)
+
+
+def qq_metrics_from_sorted(sorted_p: np.ndarray) -> Dict[str, object]:
+    p = sorted_p
     n = len(p)
     if n < 10:
         return {
@@ -308,7 +368,7 @@ def qq_metrics(p_values: np.ndarray) -> Dict[str, object]:
             "qq_interpretation": "Too few valid P values for QQ curve classification.",
         }
     exp = expected_qq(n)
-    obs = observed_qq(p)
+    obs = -np.log10(p)
     delta = obs - exp
     body_mask = (exp >= 0.1) & (exp <= 2.0)
     if not np.any(body_mask):
@@ -343,6 +403,10 @@ def qq_metrics(p_values: np.ndarray) -> Dict[str, object]:
     }
 
 
+def qq_metrics(p_values: np.ndarray, args: argparse.Namespace) -> Dict[str, object]:
+    return qq_metrics_from_sorted(sort_p_values(p_values, args))
+
+
 def classify_metrics(p_values: np.ndarray, n_rows: int, args: argparse.Namespace) -> Dict[str, object]:
     valid = np.isfinite(p_values) & (p_values > 0) & (p_values <= 1)
     p_valid = p_values[valid]
@@ -368,8 +432,8 @@ def classify_metrics(p_values: np.ndarray, n_rows: int, args: argparse.Namespace
         reasons.append("many_invalid_p")
 
     if n_valid:
-        chisq = p_to_chisq(p_valid)
-        med_chisq = float(np.nanmedian(chisq))
+        median_p = float(np.nanmedian(p_valid))
+        med_chisq = p_to_chisq_scalar(median_p)
         lambda_gc = med_chisq / 0.454936423119572
         min_p = float(np.nanmin(p_valid))
         n_sig = int(np.sum(p_valid < args.sig_threshold))
@@ -484,21 +548,44 @@ def solution_for(status: str, reasons: str, qq_shape: Optional[str]) -> str:
     return "Review QQ plot together with numeric QC metrics; rerun full Manhattan+QQ for this group/trait before deciding."
 
 
-def make_qq_plot(p_values: np.ndarray, title: str, output: str) -> None:
+def make_qq_plot(sorted_p: np.ndarray, title: str, output: str, args: argparse.Namespace, lambda_gc: Optional[float]) -> None:
     plt = load_pyplot()
-    p = p_values[np.isfinite(p_values) & (p_values > 0) & (p_values <= 1)]
-    exp = expected_qq(len(p))
-    obs = observed_qq(p)
+    p = sorted_p
+    n = len(p)
+    if n == 0:
+        raise ValueError("No valid P values available for QQ plot.")
+    idx = qq_plot_indices(n, args.qq_max_points)
+    exp_all = expected_qq(n)
+    exp = exp_all[idx]
+    obs = -np.log10(p[idx])
     axis_max = float(np.nanmax([np.nanmax(exp), np.nanmax(obs)]))
-    plt.figure(figsize=(5.8, 5.6), dpi=160)
-    plt.scatter(exp, obs, s=2, alpha=0.6, color="#3B6EA8", linewidths=0)
-    plt.plot([0, axis_max], [0, axis_max], color="#777777", linewidth=0.8)
+    ci_idx = qq_plot_indices(n, min(args.qq_ci_points, args.qq_max_points))
+    ci_x = exp_all[ci_idx]
+    ci_lower, ci_upper = qq_ci_band(n, ci_idx, args.qq_confidence)
+
+    plt.figure(figsize=(6.2, 6.0), dpi=args.plot_dpi)
+    if ci_lower is not None and ci_upper is not None:
+        plt.fill_between(ci_x, ci_lower, ci_upper, color="#D8DEE9", alpha=0.72, linewidth=0, label=f"{int(args.qq_confidence * 100)}% CI")
+    plt.scatter(exp, obs, s=3.2, alpha=0.58, color="#0072B2", linewidths=0, label="Observed")
+    plt.plot([0, axis_max], [0, axis_max], color="#444444", linewidth=0.9, label="Expected")
     plt.xlim(0, axis_max)
     plt.ylim(0, axis_max)
     plt.gca().set_aspect("equal", adjustable="box")
-    plt.title(title, fontsize=9)
+    lambda_text = "NA" if lambda_gc is None else f"{lambda_gc:.3f}"
+    plt.title(title, fontsize=10, pad=10)
+    plt.text(
+        0.04,
+        0.96,
+        f"lambdaGC = {lambda_text}\nN = {n:,}",
+        transform=plt.gca().transAxes,
+        ha="left",
+        va="top",
+        fontsize=8.5,
+        bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#BBBBBB", "alpha": 0.86},
+    )
     plt.xlabel("Expected -log10(P)")
     plt.ylabel("Observed -log10(P)")
+    plt.legend(loc="lower right", frameon=False, fontsize=8)
     plt.tight_layout()
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output)
@@ -562,14 +649,15 @@ def make_manhattan_plot(path: str, title: str, output: str, args: argparse.Names
     plt = load_pyplot()
     chr_arr, pos, p, centers, labels = prepare_manhattan_data(path, args)
     y = -np.log10(p)
-    plt.figure(figsize=(9.5, 4.6), dpi=160)
-    colors = np.where(chr_arr % 2 == 0, "#3B6EA8", "#1E1E1E")
-    plt.scatter(pos, y, s=1.8, c=colors, alpha=0.65, linewidths=0)
-    plt.axhline(-math.log10(args.sig_threshold), color="#B83232", linewidth=0.8)
-    plt.title(title, fontsize=9)
+    plt.figure(figsize=(10.8, 4.8), dpi=args.plot_dpi)
+    colors = np.where(chr_arr % 2 == 0, "#0072B2", "#E69F00")
+    plt.scatter(pos, y, s=2.0, c=colors, alpha=0.68, linewidths=0)
+    plt.axhline(-math.log10(args.sig_threshold), color="#B2182B", linewidth=0.9)
+    plt.title(title, fontsize=10, pad=8)
     plt.xlabel("Chromosome")
     plt.ylabel("-log10(P)")
     plt.xticks(centers, labels, fontsize=7)
+    plt.grid(axis="y", color="#E6E6E6", linewidth=0.5)
     plt.tight_layout()
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output)
@@ -580,10 +668,10 @@ def make_full_plot(path: str, title: str, output: str, args: argparse.Namespace)
     plt = load_pyplot()
     chr_arr, pos, p, centers, labels = prepare_manhattan_data(path, args)
     y = -np.log10(p)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), dpi=160)
-    colors = np.where(chr_arr % 2 == 0, "#3B6EA8", "#1E1E1E")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), dpi=args.plot_dpi)
+    colors = np.where(chr_arr % 2 == 0, "#0072B2", "#E69F00")
     axes[0].scatter(pos, y, s=1.8, c=colors, alpha=0.65, linewidths=0)
-    axes[0].axhline(-math.log10(args.sig_threshold), color="#B83232", linewidth=0.8)
+    axes[0].axhline(-math.log10(args.sig_threshold), color="#B2182B", linewidth=0.8)
     axes[0].set_title(title, fontsize=9)
     axes[0].set_xlabel("Chromosome")
     axes[0].set_ylabel("-log10(P)")
@@ -636,7 +724,8 @@ def process_one(row: Dict[str, str], args: argparse.Namespace) -> Dict[str, obje
         p_values, n_rows, _ = read_p_values(file_path, args.p_col)
         metrics = classify_metrics(p_values, n_rows, args)
         base.update(metrics)
-        qqm = qq_metrics(p_values) if args.mode in {"qq", "full"} else {
+        sorted_p = sort_p_values(p_values, args) if args.mode in {"qq", "full"} else None
+        qqm = qq_metrics_from_sorted(sorted_p) if sorted_p is not None else {
             "qq_body_median_delta": None,
             "qq_body_rmse": None,
             "qq_tail_lift": None,
@@ -645,7 +734,7 @@ def process_one(row: Dict[str, str], args: argparse.Namespace) -> Dict[str, obje
         }
         base.update(qqm)
         if args.mode == "qq":
-            make_qq_plot(p_values, f"{population} {trait} {qqm['qq_shape']}", qq_file)
+            make_qq_plot(sorted_p, f"{population} {trait} {qqm['qq_shape']}", qq_file, args, base.get("lambda_gc"))
         if args.mode == "manhattan":
             make_manhattan_plot(file_path, f"{population} {trait}", manhattan_file, args)
         if args.mode == "full":
@@ -708,6 +797,7 @@ def main() -> None:
     print(f"Run mode: {args.mode}", file=sys.stderr)
     print(f"Assessment mode: {args.assessment_mode}", file=sys.stderr)
     print(f"Polars enabled: {'yes' if pl is not None else 'no, using Python csv fallback'}", file=sys.stderr)
+    print(f"CuPy GPU QQ sort enabled: {'available' if cp is not None else 'not available'}", file=sys.stderr)
     if args.mode in {"qq", "manhattan", "full"}:
         try:
             load_pyplot()

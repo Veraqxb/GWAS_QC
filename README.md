@@ -60,9 +60,17 @@ The recommended server workflow uses the Python fast script.
 conda install -c conda-forge numpy scipy matplotlib polars
 ```
 
+Optional GPU acceleration for QQ sorting requires a CUDA-matched CuPy build. Example for CUDA 12:
+
+```bash
+conda install -c conda-forge cupy cuda-version=12.0
+```
+
 If `polars` is unavailable, the script can still run with a slower Python `csv` fallback, but installing Polars is strongly recommended.
 For whitespace-delimited GCTA `.mlma` files, the fast script uses `numpy.loadtxt(usecols=...)` to read only the required columns.
 Use Python 3.8 or newer.
+
+GPU note: `.mlma` text parsing is usually the main bottleneck, so GPU mainly helps the QQ sorting step for very large files. It does not remove the need to read the text files from disk.
 
 ## Install R Dependencies
 
@@ -158,8 +166,24 @@ python scripts/gwas_mlma_qc_fast.py \
   --manifest manifest.tsv \
   --outdir qc_step2_qq \
   --threads 4 \
-  --mode qq
+  --mode qq \
+  --qq-max-points 100000 \
+  --qq-confidence 0.95
 ```
+
+GPU QQ sorting, if CuPy is installed:
+
+```bash
+python scripts/gwas_mlma_qc_fast.py \
+  --manifest manifest.tsv \
+  --outdir qc_step2_qq_gpu \
+  --threads 2 \
+  --mode qq \
+  --qq-engine gpu \
+  --qq-max-points 100000
+```
+
+Use fewer threads with GPU mode so multiple processes do not fight for the same GPU memory.
 
 Partial run by population:
 
@@ -189,6 +213,12 @@ Main outputs:
 - `qq_plots/`
 - `qq_shape_summary.tsv`
 - `qc_quality_solutions.tsv`
+
+QQ plot style:
+
+- points are downsampled for drawing using `--qq-max-points`, but lambda GC and QC metrics use all valid P values
+- each plot includes a confidence interval ribbon when SciPy is available
+- each plot annotates `lambdaGC` and valid SNP count
 
 QQ shape classes:
 
@@ -263,6 +293,7 @@ python scripts/gwas_mlma_qc_fast.py \
 ```
 
 Increase `--max-plot-points` for publication-style figures. Decrease it for faster visual QC.
+Manhattan colors use a colorblind-safe blue/orange palette, with a dark red genome-wide significance line.
 
 ### Legacy Combined Plot
 
