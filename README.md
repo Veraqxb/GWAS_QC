@@ -185,6 +185,122 @@ python scripts/gwas_mlma_qc_fast.py \
 
 Use fewer threads with GPU mode so multiple processes do not fight for the same GPU memory.
 
+#### Two-GPU QQ Workflow
+
+When a server has 2 GPUs, split the manifest into two files and bind one Python process to each GPU. This is usually more stable than using many threads with one process.
+
+Create split manifests:
+
+```bash
+mkdir -p QC_02_2026_results/gpu_split
+
+head -n 1 QC_02_2026_results/manifest.tsv > QC_02_2026_results/gpu_split/manifest_gpu0.tsv
+head -n 1 QC_02_2026_results/manifest.tsv > QC_02_2026_results/gpu_split/manifest_gpu1.tsv
+
+awk 'NR==1{next} NR%2==0{print >> "QC_02_2026_results/gpu_split/manifest_gpu0.tsv"} NR%2==1{print >> "QC_02_2026_results/gpu_split/manifest_gpu1.tsv"}' \
+  QC_02_2026_results/manifest.tsv
+```
+
+Test each GPU with a small subset first:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python GWAS_QC/scripts/gwas_mlma_qc_fast.py \
+  --manifest QC_02_2026_results/gpu_split/manifest_gpu0.tsv \
+  --outdir QC_02_2026_results/test_gpu0_qq \
+  --threads 1 \
+  --mode qq \
+  --assessment-mode full \
+  --qq-engine gpu \
+  --qq-max-points 100000 \
+  --limit 4
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python GWAS_QC/scripts/gwas_mlma_qc_fast.py \
+  --manifest QC_02_2026_results/gpu_split/manifest_gpu1.tsv \
+  --outdir QC_02_2026_results/test_gpu1_qq \
+  --threads 1 \
+  --mode qq \
+  --assessment-mode full \
+  --qq-engine gpu \
+  --qq-max-points 100000 \
+  --limit 4
+```
+
+Run the full QQ workflow on both GPUs:
+
+```bash
+mkdir -p QC_02_2026_results/logs
+
+CUDA_VISIBLE_DEVICES=0 python GWAS_QC/scripts/gwas_mlma_qc_fast.py \
+  --manifest QC_02_2026_results/gpu_split/manifest_gpu0.tsv \
+  --outdir QC_02_2026_results/step2_qq_gpu0 \
+  --threads 1 \
+  --mode qq \
+  --assessment-mode full \
+  --qq-engine gpu \
+  --qq-max-points 100000 \
+  > QC_02_2026_results/logs/step2_qq_gpu0.log 2>&1 &
+
+CUDA_VISIBLE_DEVICES=1 python GWAS_QC/scripts/gwas_mlma_qc_fast.py \
+  --manifest QC_02_2026_results/gpu_split/manifest_gpu1.tsv \
+  --outdir QC_02_2026_results/step2_qq_gpu1 \
+  --threads 1 \
+  --mode qq \
+  --assessment-mode full \
+  --qq-engine gpu \
+  --qq-max-points 100000 \
+  > QC_02_2026_results/logs/step2_qq_gpu1.log 2>&1 &
+```
+
+Check progress:
+
+```bash
+jobs
+tail -f QC_02_2026_results/logs/step2_qq_gpu0.log
+tail -f QC_02_2026_results/logs/step2_qq_gpu1.log
+```
+
+Merge QQ summary tables after both jobs finish:
+
+```bash
+mkdir -p QC_02_2026_results/step2_qq_gpu_merged
+
+head -n 1 QC_02_2026_results/step2_qq_gpu0/qq_shape_summary.tsv \
+  > QC_02_2026_results/step2_qq_gpu_merged/qq_shape_summary.tsv
+
+tail -n +2 QC_02_2026_results/step2_qq_gpu0/qq_shape_summary.tsv \
+  >> QC_02_2026_results/step2_qq_gpu_merged/qq_shape_summary.tsv
+
+tail -n +2 QC_02_2026_results/step2_qq_gpu1/qq_shape_summary.tsv \
+  >> QC_02_2026_results/step2_qq_gpu_merged/qq_shape_summary.tsv
+
+head -n 1 QC_02_2026_results/step2_qq_gpu0/qc_quality_solutions.tsv \
+  > QC_02_2026_results/step2_qq_gpu_merged/qc_quality_solutions.tsv
+
+tail -n +2 QC_02_2026_results/step2_qq_gpu0/qc_quality_solutions.tsv \
+  >> QC_02_2026_results/step2_qq_gpu_merged/qc_quality_solutions.tsv
+
+tail -n +2 QC_02_2026_results/step2_qq_gpu1/qc_quality_solutions.tsv \
+  >> QC_02_2026_results/step2_qq_gpu_merged/qc_quality_solutions.tsv
+```
+
+Optionally collect QQ images into one directory:
+
+```bash
+mkdir -p QC_02_2026_results/step2_qq_gpu_merged/qq_plots
+
+cp -r QC_02_2026_results/step2_qq_gpu0/qq_plots/* QC_02_2026_results/step2_qq_gpu_merged/qq_plots/
+cp -r QC_02_2026_results/step2_qq_gpu1/qq_plots/* QC_02_2026_results/step2_qq_gpu_merged/qq_plots/
+```
+
+Recommended resource settings:
+
+- metrics: CPU only, `--threads 4`
+- QQ GPU: 2 shell jobs, each with `CUDA_VISIBLE_DEVICES=<gpu_id>` and `--threads 1`
+- Manhattan: CPU only, `--threads 2` to `4`
+- if GPU memory is limited, keep `--qq-max-points 100000`
+
 Partial run by population:
 
 ```bash
